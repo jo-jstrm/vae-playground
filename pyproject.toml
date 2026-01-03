@@ -12,6 +12,7 @@ dependencies = [
     "torcheval>=0.0.7",
     "torchsummary>=1.5.1",
     "torchvision>=0.24.1",
+    "tqdm>=4.67.1",
 ]
 
 [project.scripts]

@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -65,7 +66,7 @@ def test(
 def train(model: torch.nn.Module,
           log_writer: SummaryWriter,
           checkpoint_dir: str,
-          pretrained_path: str=None,
+          pretrained_path: Optional[str]=None,
           num_epochs: int=1000,
           batch_size: int=512,
           num_workers: int=2,
