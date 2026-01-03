@@ -10,7 +10,7 @@ from torchvision.datasets import CIFAR10
 import torchvision.transforms as T
 from tqdm import tqdm
 
-from .vae import elbo_loss
+from vae_playground.vae import elbo_loss
 
 
 def validate(model: torch.nn.Module,
