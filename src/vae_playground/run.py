@@ -4,7 +4,9 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
+import mlflow
+import tempfile
+import os
 from torcheval.metrics.functional import peak_signal_noise_ratio
 import torchvision
 from torchvision.datasets import CIFAR10
@@ -16,7 +18,7 @@ from vae_playground.vae import elbo_loss
 
 def validate(model: torch.nn.Module,
              epoch: int,
-             log_writer: SummaryWriter,
+             log_writer: Optional[object],
              dataloader: torch.utils.data.DataLoader,
              test: bool=False
 ):
@@ -33,28 +35,34 @@ def validate(model: torch.nn.Module,
             mse_scores.append(F.mse_loss(x_hat, x))
             if i == 0:
                 x_grid = torchvision.utils.make_grid(
-                                x[:8].unsqueeze(0), nrow=2, normalize=True, scale_each=True)
+                                x[:8], nrow=2, normalize=True, scale_each=True)
                 x_hat_grid = torchvision.utils.make_grid(
-                                x_hat[:8].unsqueeze(0), nrow=2, normalize=True, scale_each=True)
-                log_writer.add_images('Validation input Images', x_grid, epoch)
-                log_writer.add_images('Validation reconstructed Images', x_hat_grid, epoch)
+                                x_hat[:8], nrow=2, normalize=True, scale_each=True)
+                # Save grids as images and log to MLflow
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                    torchvision.utils.save_image(x_grid, f.name)
+                    mlflow.log_artifact(f.name, artifact_path='images')
+                    os.unlink(f.name)
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                    torchvision.utils.save_image(x_hat_grid, f.name)
+                    mlflow.log_artifact(f.name, artifact_path='images')
+                    os.unlink(f.name)
         avg_elbo = torch.stack(elbo_losses).mean()
         avg_mse_score = torch.stack(mse_scores).mean()
         avg_psnr_score = torch.stack(psnr_scores).mean()
         # We have the same loop for validation and testing. Adapt the log names accordingly.
         run_type = 'Test' if test else 'Validation'        
-        log_writer.add_scalar(f'{run_type} ELBO', avg_elbo, epoch)
-        log_writer.add_scalar(f'{run_type} MSE', avg_mse_score, epoch)
-        log_writer.add_scalar(f'{run_type} PSNR', avg_psnr_score, epoch)
+        mlflow.log_metric(f'{run_type} ELBO', float(avg_elbo), step=epoch)
+        mlflow.log_metric(f'{run_type} MSE', float(avg_mse_score), step=epoch)
+        mlflow.log_metric(f'{run_type} PSNR', float(avg_psnr_score), step=epoch)
         # print(f'    {run_type} metrics, averaged over validation set: '
         #         f'MSE: {avg_mse_score:0.6f}, '
         #         f'PSNR: {avg_psnr_score:0.6f}')
 
 
 def test(
-        model: torch.nn.Module, log_writer: SummaryWriter, batch_size: int=512, num_workers: int=2
+    model: torch.nn.Module, log_writer: Optional[object]=None, batch_size: int=512, num_workers: int=2
 ):
-    log_writer = SummaryWriter()
     transform = T.Compose([T.ToTensor()])
     test_set = CIFAR10(root='./data', download=False, train=False, transform=transform)
     test_dataloader = torch.utils.data.DataLoader(
@@ -64,8 +72,8 @@ def test(
 
 
 def train(model: torch.nn.Module,
-          log_writer: SummaryWriter,
           checkpoint_dir: str,
+          log_writer: Optional[object]=None,
           pretrained_path: Optional[str]=None,
           num_epochs: int=1000,
           batch_size: int=512,
@@ -135,23 +143,27 @@ def train(model: torch.nn.Module,
                 loss.backward()
                 optimizer.step()
                 epoch_losses.append(loss)
-            log_writer.add_scalar('Train ELBO loss', torch.stack(epoch_losses).mean(), epoch)
+            mlflow.log_metric('Train ELBO loss', float(torch.stack(epoch_losses).mean()), step=epoch)
             if epoch % 10 == 0:
                 pbar.set_postfix({'loss': f'{loss.item():0.6f}'})
             if epoch % val_freq == 0:
                 x_grid = torchvision.utils.make_grid(
-                                x[:8].unsqueeze(0), nrow=2, normalize=True, scale_each=True)
+                                x[:8], nrow=2, normalize=True, scale_each=True)
                 x_hat_grid = torchvision.utils.make_grid(
-                                x_hat[:8].unsqueeze(0), nrow=2, normalize=True, scale_each=True)
-                log_writer.add_images('Train input Images', x_grid, epoch)
-                log_writer.add_images('Train reconstructed Images', x_hat_grid, epoch)
+                                x_hat[:8], nrow=2, normalize=True, scale_each=True)
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                    torchvision.utils.save_image(x_grid, f.name)
+                    mlflow.log_artifact(f.name, artifact_path='images')
+                    os.unlink(f.name)
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                    torchvision.utils.save_image(x_hat_grid, f.name)
+                    mlflow.log_artifact(f.name, artifact_path='images')
+                    os.unlink(f.name)
                 validate(model, epoch, log_writer, val_dataloader)
             if epoch % checkpoint_freq == 0:
                 save_path = Path(checkpoint_dir) / f'{datetime.now()}_vae_{epoch}.pt'
                 torch.save(model.state_dict(), save_path)                            
             pbar.update(1)
-    log_writer.flush()
-    log_writer.close()
     save_path = Path(checkpoint_dir) / f'{datetime.now()}_vae_{epoch}.pt'
     torch.save(model.state_dict(), save_path)
     print('Training Done.')
