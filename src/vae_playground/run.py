@@ -1,4 +1,5 @@
-from datetime import datetime
+import argparse
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -6,19 +7,19 @@ import torch
 import torch.nn.functional as F
 import mlflow
 import tempfile
-import os
 from torcheval.metrics.functional import peak_signal_noise_ratio
 import torchvision
 from torchvision.datasets import CIFAR10
 import torchvision.transforms as T
 from tqdm import tqdm
 
-from vae_playground.vae import elbo_loss
+
+from vae_playground.vae import elbo_loss, VAE
+from vae_playground.config import TrainConfig, DataConfig, TestConfig, Config
 
 
 def validate(model: torch.nn.Module,
              epoch: int,
-             log_writer: Optional[object],
              dataloader: torch.utils.data.DataLoader,
              test: bool=False
 ):
@@ -61,26 +62,34 @@ def validate(model: torch.nn.Module,
 
 
 def test(
-    model: torch.nn.Module, log_writer: Optional[object]=None, batch_size: int=512, num_workers: int=2
-):
+    model: torch.nn.Module,
+    test_cfg: TestConfig,
+) -> None:
+    """Test the model on the test set.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model to test.
+    config : dict
+        Configuration dictionary with testing parameters.
+    """
+    batch_size = test_cfg.batch_size
+    num_workers = test_cfg.num_workers
     transform = T.Compose([T.ToTensor()])
     test_set = CIFAR10(root='./data', download=False, train=False, transform=transform)
     test_dataloader = torch.utils.data.DataLoader(
                     test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    validate(model, 0, log_writer, test_dataloader, test=True)
+    validate(model, 0, test_dataloader, test=True)
     print('Testing Done.')
 
 
-def train(model: torch.nn.Module,
-          checkpoint_dir: str,
-          log_writer: Optional[object]=None,
-          pretrained_path: Optional[str]=None,
-          num_epochs: int=1000,
-          batch_size: int=512,
-          num_workers: int=2,
-          val_freq: int=100,
-          learn_rate: float=1e-3,
-          overfit: bool=False
+def train(
+    model: torch.nn.Module,
+#   checkpoint_dir: str,
+    train_cfg: TrainConfig,
+    data_cfg: DataConfig,
+    pretrained_path: Optional[str]=None
 ) -> torch.nn.Module:
     """Train the model, log metrics and save checkpoints.
 
@@ -88,36 +97,34 @@ def train(model: torch.nn.Module,
     ----------
     model : torch.nn.Module
         Model to train.
-    log_writer : SummaryWriter
-        Tensorboard logger.
     checkpoint_dir: str
         Directory to save checkpoints to.
+    config_path: str
+        Path to YAML configuration file.
     pretrained_path: str, optional
         Path to a pre-trained checkpoint, by default None
-    num_epochs : int, optional
-        Number of epochs to train. If there is a pretrained checkpoint given,
-        these epochs are added on top of the checkpoint's epochs. By default 1000.
-    batch_size : int, optional
-        by default 512
-    num_workers : int, optional
-        by default 2
-    val_freq : int, optional
-        Validate every *val_freq* epochs., by default 100
 
     Returns
     -------
     torch.nn.Module
         Trained model.
     """
-    checkpoint_freq = 1000
+    # Config is provided via dependency injection as validated sub-configs.
+    num_epochs = train_cfg.num_epochs
+    batch_size = train_cfg.batch_size
+    num_workers = train_cfg.num_workers
+    learn_rate = train_cfg.learn_rate
+    val_freq = train_cfg.val_freq
+    checkpoint_freq = train_cfg.checkpoint_freq
+    train_split = data_cfg.train_split
+    
     transform = T.Compose([T.ToTensor()])
     train_set = CIFAR10(root='./data', download=True, train=True, transform=transform)
     val_set = CIFAR10(root='./data', download=False, train=True, transform=transform)
-    # 80% train, 20% validation
-    split = int(len(train_set) * 0.8)
-    overfit_size = 8
-    batch_size = batch_size if not overfit else overfit_size
-    train_set.data = train_set.data[:split] if not overfit else train_set.data[:overfit_size]
+    # Train/validation split
+    split = int(len(train_set) * train_split)
+    batch_size = batch_size
+    train_set.data = train_set.data[:split]
     val_set.data = val_set.data[split:]
     train_dataloader = torch.utils.data.DataLoader(
                     train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
@@ -142,15 +149,17 @@ def train(model: torch.nn.Module,
                 loss = elbo_loss(x, x_hat, mus, log_vars)
                 loss.backward()
                 optimizer.step()
-                epoch_losses.append(loss)
+                epoch_losses.append(loss.detach())
             mlflow.log_metric('Train ELBO loss', float(torch.stack(epoch_losses).mean()), step=epoch)
             if epoch % 10 == 0:
                 pbar.set_postfix({'loss': f'{loss.item():0.6f}'})
             if epoch % val_freq == 0:
                 x_grid = torchvision.utils.make_grid(
-                                x[:8], nrow=2, normalize=True, scale_each=True)
+                    x[:8], nrow=2, normalize=True, scale_each=True
+               )
                 x_hat_grid = torchvision.utils.make_grid(
-                                x_hat[:8], nrow=2, normalize=True, scale_each=True)
+                    x_hat[:8], nrow=2, normalize=True, scale_each=True
+               )
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
                     torchvision.utils.save_image(x_grid, f.name)
                     mlflow.log_artifact(f.name, artifact_path='images')
@@ -159,13 +168,65 @@ def train(model: torch.nn.Module,
                     torchvision.utils.save_image(x_hat_grid, f.name)
                     mlflow.log_artifact(f.name, artifact_path='images')
                     os.unlink(f.name)
-                validate(model, epoch, log_writer, val_dataloader)
-            if epoch % checkpoint_freq == 0:
-                save_path = Path(checkpoint_dir) / f'{datetime.now()}_vae_{epoch}.pt'
-                torch.save(model.state_dict(), save_path)                            
+                validate(model, epoch, val_dataloader)
+            # if epoch % checkpoint_freq == 0:
+                # save_path = Path(checkpoint_dir) / f'{datetime.now()}_vae_{epoch}.pt'
+                # torch.save(model.state_dict(), save_path)                            
             pbar.update(1)
-    save_path = Path(checkpoint_dir) / f'{datetime.now()}_vae_{epoch}.pt'
-    torch.save(model.state_dict(), save_path)
+    # save_path = Path(checkpoint_dir) / f'{datetime.now()}_vae_{epoch}.pt'
+    # torch.save(model.state_dict(), save_path)
     print('Training Done.')
     model.eval()
     return model
+
+
+
+def run(cfg: Config) -> None:
+    """Training runner."""
+    assert torch.cuda.is_available()
+
+    # Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
+    vae = VAE().to(device)
+    # pretrained_path = (checkpoint_dir + pretrained_file) if pretrained_file else None
+
+    mlflow.set_tracking_uri('http://localhost:8080')
+    mlflow.set_experiment('VAE CIFAR Training')
+    with mlflow.start_run():
+        mlflow.log_params({
+            'num_epochs': cfg.train.num_epochs,
+            'batch_size': cfg.train.batch_size,
+            'val_freq': cfg.train.val_freq,
+            'learn_rate': cfg.train.learn_rate,
+            # 'pretrained': cfg.train.pretrained_file is not None,
+        })
+
+        vae = train(vae, train_cfg=cfg.train, data_cfg=cfg.data)
+
+        test(vae, cfg.test)
+
+        mlflow.pytorch.log_model(vae, name="vae_cifar", export_model=True) # pyright: ignore[reportPrivateImportUsage]
+
+
+    
+def main(argv: list[str] | None = None) -> None:
+    """CLI entrypoint: load config, instantiate model, and start training.
+
+    The function loads the YAML config once, validates it with Pydantic,
+    creates the model and checkpoint directory, then calls `train()` with
+    only the sub-configs required (lean dependency injection).
+    """
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config_overfit.yaml", help="Path to YAML config")
+    parser.add_argument("--checkpoint-dir", type=str, default="./data/checkpoints", help="Checkpoint directory")
+    parser.add_argument("--pretrained", type=str, default=None, help="Optional path to pretrained checkpoint")
+    args = parser.parse_args(argv)
+
+    config = Config().from_yaml(Path(args.config))
+    # Call the notebook-style training runner
+    run(config)
+
+
+if __name__ == "__main__":
+    main()

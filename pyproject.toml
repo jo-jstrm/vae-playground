@@ -8,11 +8,14 @@ dependencies = [
     "einops>=0.8.1",
     "jupyter>=1.1.1",
     "mlflow[pytorch]>=3.9.0",
+    "pyyaml>=6.0",
     "torch>=2.9.1",
+    "pydantic>=2.5",
     "torcheval>=0.0.7",
     "torchsummary>=1.5.1",
     "torchvision>=0.24.1",
     "tqdm>=4.67.1",
+    "pydantic-settings>=2.12.0",
 ]
 
 [project.scripts]
