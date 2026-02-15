@@ -1,4 +1,5 @@
-from datetime import datetime
+import argparse
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -6,14 +7,12 @@ import torch
 import torch.nn.functional as F
 import mlflow
 import tempfile
-import os
 from torcheval.metrics.functional import peak_signal_noise_ratio
 import torchvision
 from torchvision.datasets import CIFAR10
 import torchvision.transforms as T
 from tqdm import tqdm
 
-import argparse
 
 from vae_playground.vae import elbo_loss, VAE
 from vae_playground.config import TrainConfig, DataConfig, TestConfig, Config
@@ -184,6 +183,8 @@ def train(
 
 def run(cfg: Config) -> None:
     """Training runner."""
+    assert torch.cuda.is_available()
+
     # Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
@@ -205,11 +206,7 @@ def run(cfg: Config) -> None:
 
         test(vae, cfg.test)
 
-        # Log the final model
-        try:
-            mlflow.pytorch.log_model(vae, "model")
-        except Exception:
-            pass
+        mlflow.pytorch.log_model(vae, name="vae_cifar", export_model=True) # pyright: ignore[reportPrivateImportUsage]
 
 
     
